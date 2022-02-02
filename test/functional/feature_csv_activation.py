@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2015-2020 The Bitcoin Core developers
+# Copyright (c) 2015-2021 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test CSV soft fork activation.
@@ -41,7 +41,6 @@ from itertools import product
 import time
 
 from test_framework.blocktools import (
-    CSV_ACTIVATION_HEIGHT,
     create_block,
     create_coinbase,
 )
@@ -69,6 +68,7 @@ SEQ_RANDOM_HIGH_BIT = 1 << 25
 SEQ_TYPE_FLAG = 1 << 22
 SEQ_RANDOM_LOW_BIT = 1 << 18
 
+
 def relative_locktime(sdf, srhb, stf, srlb):
     """Returns a locktime with certain bits set."""
 
@@ -83,8 +83,12 @@ def relative_locktime(sdf, srhb, stf, srlb):
         locktime |= SEQ_RANDOM_LOW_BIT
     return locktime
 
+
 def all_rlt_txs(txs):
     return [tx['tx'] for tx in txs]
+
+
+CSV_ACTIVATION_HEIGHT = 432
 
 
 class BIP68_112_113Test(BitcoinTestFramework):
@@ -93,13 +97,14 @@ class BIP68_112_113Test(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.extra_args = [[
             '-whitelist=noban@127.0.0.1',
+            f'-testactivationheight=csv@{CSV_ACTIVATION_HEIGHT}',
             '-par=1',  # Use only one script thread to get the exact reject reason for testing
         ]]
         self.supports_cli = False
 
     def create_self_transfer_from_utxo(self, input_tx):
         utxo = self.miniwallet.get_utxo(txid=input_tx.rehash(), mark_as_spent=False)
-        tx = self.miniwallet.create_self_transfer(from_node=self.nodes[0], utxo_to_spend=utxo)['tx']
+        tx = self.miniwallet.create_self_transfer(utxo_to_spend=utxo)['tx']
         return tx
 
     def create_bip112special(self, input, txversion):
@@ -143,13 +148,13 @@ class BIP68_112_113Test(BitcoinTestFramework):
         for i, (sdf, srhb, stf, srlb) in enumerate(product(*[[True, False]] * 4)):
             locktime = relative_locktime(sdf, srhb, stf, srlb)
             tx = self.create_self_transfer_from_utxo(bip112inputs[i])
-            if (varyOP_CSV):  # if varying OP_CSV, nSequence is fixed
+            if varyOP_CSV:  # if varying OP_CSV, nSequence is fixed
                 tx.vin[0].nSequence = BASE_RELATIVE_LOCKTIME + locktime_delta
             else:  # vary nSequence instead, OP_CSV is fixed
                 tx.vin[0].nSequence = locktime + locktime_delta
             tx.nVersion = txversion
             self.miniwallet.sign_tx(tx)
-            if (varyOP_CSV):
+            if varyOP_CSV:
                 tx.vin[0].scriptSig = CScript([locktime, OP_CHECKSEQUENCEVERIFY, OP_DROP] + list(CScript(tx.vin[0].scriptSig)))
             else:
                 tx.vin[0].scriptSig = CScript([BASE_RELATIVE_LOCKTIME, OP_CHECKSEQUENCEVERIFY, OP_DROP] + list(CScript(tx.vin[0].scriptSig)))
@@ -168,11 +173,7 @@ class BIP68_112_113Test(BitcoinTestFramework):
         return test_blocks
 
     def create_test_block(self, txs):
-        block = create_block(self.tip, create_coinbase(self.tipheight + 1), self.last_block_time + 600)
-        block.nVersion = 4
-        block.vtx.extend(txs)
-        block.hashMerkleRoot = block.calc_merkle_root()
-        block.rehash()
+        block = create_block(self.tip, create_coinbase(self.tipheight + 1), self.last_block_time + 600, txlist=txs)
         block.solve()
         return block
 
@@ -197,7 +198,7 @@ class BIP68_112_113Test(BitcoinTestFramework):
 
         # Activation height is hardcoded
         # We advance to block height five below BIP112 activation for the following tests
-        test_blocks = self.generate_blocks(CSV_ACTIVATION_HEIGHT-5 - COINBASE_BLOCK_COUNT)
+        test_blocks = self.generate_blocks(CSV_ACTIVATION_HEIGHT - 5 - COINBASE_BLOCK_COUNT)
         self.send_blocks(test_blocks)
         assert not softfork_active(self.nodes[0], 'csv')
 
@@ -481,6 +482,7 @@ class BIP68_112_113Test(BitcoinTestFramework):
 
         self.send_blocks([self.create_test_block(time_txs)])
         self.nodes[0].invalidateblock(self.nodes[0].getbestblockhash())
+
 
 if __name__ == '__main__':
     BIP68_112_113Test().main()

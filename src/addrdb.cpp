@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2021 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -18,8 +18,15 @@
 #include <univalue.h>
 #include <util/settings.h>
 #include <util/system.h>
+#include <util/translation.h>
 
 namespace {
+
+class DbNotFoundError : public std::exception
+{
+    using std::exception::exception;
+};
+
 template <typename Stream, typename Data>
 bool SerializeDB(Stream& stream, const Data& data)
 {
@@ -51,7 +58,7 @@ bool SerializeFileDB(const std::string& prefix, const fs::path& path, const Data
     if (fileout.IsNull()) {
         fileout.fclose();
         remove(pathTmp);
-        return error("%s: Failed to open file %s", __func__, pathTmp.string());
+        return error("%s: Failed to open file %s", __func__, fs::PathToString(pathTmp));
     }
 
     // Serialize
@@ -63,7 +70,7 @@ bool SerializeFileDB(const std::string& prefix, const fs::path& path, const Data
     if (!FileCommit(fileout.Get())) {
         fileout.fclose();
         remove(pathTmp);
-        return error("%s: Failed to flush file %s", __func__, pathTmp.string());
+        return error("%s: Failed to flush file %s", __func__, fs::PathToString(pathTmp));
     }
     fileout.fclose();
 
@@ -77,53 +84,46 @@ bool SerializeFileDB(const std::string& prefix, const fs::path& path, const Data
 }
 
 template <typename Stream, typename Data>
-bool DeserializeDB(Stream& stream, Data& data, bool fCheckSum = true)
+void DeserializeDB(Stream& stream, Data& data, bool fCheckSum = true)
 {
-    try {
-        CHashVerifier<Stream> verifier(&stream);
-        // de-serialize file header (network specific magic number) and ..
-        unsigned char pchMsgTmp[4];
-        verifier >> pchMsgTmp;
-        // ... verify the network matches ours
-        if (memcmp(pchMsgTmp, Params().MessageStart(), sizeof(pchMsgTmp)))
-            return error("%s: Invalid network magic number", __func__);
+    CHashVerifier<Stream> verifier(&stream);
+    // de-serialize file header (network specific magic number) and ..
+    unsigned char pchMsgTmp[4];
+    verifier >> pchMsgTmp;
+    // ... verify the network matches ours
+    if (memcmp(pchMsgTmp, Params().MessageStart(), sizeof(pchMsgTmp))) {
+        throw std::runtime_error{"Invalid network magic number"};
+    }
 
-        // de-serialize data
-        verifier >> data;
+    // de-serialize data
+    verifier >> data;
 
-        // verify checksum
-        if (fCheckSum) {
-            uint256 hashTmp;
-            stream >> hashTmp;
-            if (hashTmp != verifier.GetHash()) {
-                return error("%s: Checksum mismatch, data corrupted", __func__);
-            }
+    // verify checksum
+    if (fCheckSum) {
+        uint256 hashTmp;
+        stream >> hashTmp;
+        if (hashTmp != verifier.GetHash()) {
+            throw std::runtime_error{"Checksum mismatch, data corrupted"};
         }
     }
-    catch (const std::exception& e) {
-        return error("%s: Deserialize or I/O error - %s", __func__, e.what());
-    }
-
-    return true;
 }
 
 template <typename Data>
-bool DeserializeFileDB(const fs::path& path, Data& data, int version)
+void DeserializeFileDB(const fs::path& path, Data& data, int version)
 {
     // open input file, and associate with CAutoFile
     FILE* file = fsbridge::fopen(path, "rb");
     CAutoFile filein(file, SER_DISK, version);
     if (filein.IsNull()) {
-        LogPrintf("Missing or invalid file %s\n", path.string());
-        return false;
+        throw DbNotFoundError{};
     }
-    return DeserializeDB(filein, data);
+    DeserializeDB(filein, data);
 }
 } // namespace
 
 CBanDB::CBanDB(fs::path ban_list_path)
-    : m_banlist_dat(ban_list_path.string() + ".dat"),
-      m_banlist_json(ban_list_path.string() + ".json")
+    : m_banlist_dat(ban_list_path + ".dat"),
+      m_banlist_json(ban_list_path + ".json")
 {
 }
 
@@ -143,7 +143,7 @@ bool CBanDB::Write(const banmap_t& banSet)
 bool CBanDB::Read(banmap_t& banSet)
 {
     if (fs::exists(m_banlist_dat)) {
-        LogPrintf("banlist.dat ignored because it can only be read by " PACKAGE_NAME " version 22.x. Remove %s to silence this warning.\n", m_banlist_dat);
+        LogPrintf("banlist.dat ignored because it can only be read by " PACKAGE_NAME " version 22.x. Remove %s to silence this warning.\n", fs::quoted(fs::PathToString(m_banlist_dat)));
     }
     // If the JSON banlist does not exist, then recreate it
     if (!fs::exists(m_banlist_json)) {
@@ -155,7 +155,7 @@ bool CBanDB::Read(banmap_t& banSet)
 
     if (!util::ReadSettings(m_banlist_json, settings, errors)) {
         for (const auto& err : errors) {
-            LogPrintf("Cannot load banlist %s: %s\n", m_banlist_json.string(), err);
+            LogPrintf("Cannot load banlist %s: %s\n", fs::PathToString(m_banlist_json), err);
         }
         return false;
     }
@@ -163,28 +163,45 @@ bool CBanDB::Read(banmap_t& banSet)
     try {
         BanMapFromJson(settings[JSON_KEY], banSet);
     } catch (const std::runtime_error& e) {
-        LogPrintf("Cannot parse banlist %s: %s\n", m_banlist_json.string(), e.what());
+        LogPrintf("Cannot parse banlist %s: %s\n", fs::PathToString(m_banlist_json), e.what());
         return false;
     }
 
     return true;
 }
 
-bool DumpPeerAddresses(const ArgsManager& args, const CAddrMan& addr)
+bool DumpPeerAddresses(const ArgsManager& args, const AddrMan& addr)
 {
     const auto pathAddr = args.GetDataDirNet() / "peers.dat";
     return SerializeFileDB("peers", pathAddr, addr, CLIENT_VERSION);
 }
 
-bool ReadPeerAddresses(const ArgsManager& args, CAddrMan& addr)
+void ReadFromStream(AddrMan& addr, CDataStream& ssPeers)
 {
-    const auto pathAddr = args.GetDataDirNet() / "peers.dat";
-    return DeserializeFileDB(pathAddr, addr, CLIENT_VERSION);
+    DeserializeDB(ssPeers, addr, false);
 }
 
-bool ReadFromStream(CAddrMan& addr, CDataStream& ssPeers)
+std::optional<bilingual_str> LoadAddrman(const std::vector<bool>& asmap, const ArgsManager& args, std::unique_ptr<AddrMan>& addrman)
 {
-    return DeserializeDB(ssPeers, addr, false);
+    auto check_addrman = std::clamp<int32_t>(args.GetIntArg("-checkaddrman", DEFAULT_ADDRMAN_CONSISTENCY_CHECKS), 0, 1000000);
+    addrman = std::make_unique<AddrMan>(asmap, /* deterministic */ false, /* consistency_check_ratio */ check_addrman);
+
+    int64_t nStart = GetTimeMillis();
+    const auto path_addr{args.GetDataDirNet() / "peers.dat"};
+    try {
+        DeserializeFileDB(path_addr, *addrman, CLIENT_VERSION);
+        LogPrintf("Loaded %i addresses from peers.dat  %dms\n", addrman->size(), GetTimeMillis() - nStart);
+    } catch (const DbNotFoundError&) {
+        // Addrman can be in an inconsistent state after failure, reset it
+        addrman = std::make_unique<AddrMan>(asmap, /* deterministic */ false, /* consistency_check_ratio */ check_addrman);
+        LogPrintf("Creating peers.dat because the file was not found (%s)\n", fs::quoted(fs::PathToString(path_addr)));
+        DumpPeerAddresses(args, *addrman);
+    } catch (const std::exception& e) {
+        addrman = nullptr;
+        return strprintf(_("Invalid or corrupt peers.dat (%s). If you believe this is a bug, please report it to %s. As a workaround, you can move the file (%s) out of the way (rename, move, or delete) to have a new one created on the next start."),
+                         e.what(), PACKAGE_BUGREPORT, fs::quoted(fs::PathToString(path_addr)));
+    }
+    return std::nullopt;
 }
 
 void DumpAnchors(const fs::path& anchors_db_path, const std::vector<CAddress>& anchors)
@@ -196,9 +213,10 @@ void DumpAnchors(const fs::path& anchors_db_path, const std::vector<CAddress>& a
 std::vector<CAddress> ReadAnchors(const fs::path& anchors_db_path)
 {
     std::vector<CAddress> anchors;
-    if (DeserializeFileDB(anchors_db_path, anchors, CLIENT_VERSION | ADDRV2_FORMAT)) {
-        LogPrintf("Loaded %i addresses from %s\n", anchors.size(), anchors_db_path.filename());
-    } else {
+    try {
+        DeserializeFileDB(anchors_db_path, anchors, CLIENT_VERSION | ADDRV2_FORMAT);
+        LogPrintf("Loaded %i addresses from %s\n", anchors.size(), fs::quoted(fs::PathToString(anchors_db_path.filename())));
+    } catch (const std::exception&) {
         anchors.clear();
     }
 
