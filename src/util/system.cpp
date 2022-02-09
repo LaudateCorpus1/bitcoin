@@ -253,7 +253,7 @@ fs::path StripRedundantLastElementsOfPath(const fs::path& path)
         result = result.parent_path();
     }
 
-    assert(fs::equivalent(result, path));
+    assert(fs::equivalent(result, path.lexically_normal()));
     return result;
 }
 } // namespace
@@ -443,12 +443,16 @@ const fs::path& ArgsManager::GetDataDir(bool net_specific) const
     } else {
         path = GetDefaultDataDir();
     }
-    if (net_specific)
-        path /= fs::PathFromString(BaseParams().DataDir());
 
-    if (fs::create_directories(path)) {
-        // This is the first run, create wallets subdirectory too
+    if (!fs::exists(path)) {
         fs::create_directories(path / "wallets");
+    }
+
+    if (net_specific && !BaseParams().DataDir().empty()) {
+        path /= fs::PathFromString(BaseParams().DataDir());
+        if (!fs::exists(path)) {
+            fs::create_directories(path / "wallets");
+        }
     }
 
     path = StripRedundantLastElementsOfPath(path);
